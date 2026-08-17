@@ -1,0 +1,12 @@
+dataset_name: demo_dataset
+
+student_answers:
+  path: data/raw/student_answers
+  extensions: [pdf, png, jpg, jpeg]
+
+answer_keys:
+  path: data/raw/answer_keys
+
+human_marks:
+  available: false
+  path: null

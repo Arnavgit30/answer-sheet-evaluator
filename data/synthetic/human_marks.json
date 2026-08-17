@@ -1,0 +1,8 @@
+{
+  "marks": [
+    {"question_id": "Q1", "human_marks": 5},
+    {"question_id": "Q2", "human_marks": 4},
+    {"question_id": "Q3(a)", "human_marks": 3},
+    {"question_id": "Q3(b)", "human_marks": 3}
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "document_id": "synthetic_student_001",
+  "pages": [
+    {
+      "page_number": 1,
+      "source_file": "synthetic_student_page_001.jpg",
+      "width": null,
+      "height": null,
+      "elements": [
+        {
+          "type": "text",
+          "label": "text",
+          "order": 1,
+          "text": "Q1 Photosynthesis changes light energy to chemical energy in glucose.",
+          "bbox": null,
+          "polygon": null,
+          "source_block_id": 1
+        },
+        {
+          "type": "text",
+          "label": "text",
+          "order": 2,
+          "text": "Q2 Evaporation happens when heat changes liquid water into water vapour.",
+          "bbox": null,
+          "polygon": null,
+          "source_block_id": 2
+        }
+      ]
+    },
+    {
+      "page_number": 2,
+      "source_file": "synthetic_student_page_002.jpg",
+      "width": null,
+      "height": null,
+      "elements": [
+        {
+          "type": "text",
+          "label": "text",
+          "order": 1,
+          "text": "Q3(a) Acid changes blue litmus paper red.",
+          "bbox": null,
+          "polygon": null,
+          "source_block_id": 3
+        },
+        {
+          "type": "text",
+          "label": "text",
+          "order": 2,
+          "text": "Q3(b) Base changes red litmus paper blue.",
+          "bbox": null,
+          "polygon": null,
+          "source_block_id": 4
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+/models
+.venv/
+node_modules/
+outputs/
+frontend/dist/
+__pycache__/
+*.pyc
+.env

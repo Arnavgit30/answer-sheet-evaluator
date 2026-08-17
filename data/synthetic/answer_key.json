@@ -1,0 +1,28 @@
+{
+  "questions": [
+    {
+      "question_id": "Q1",
+      "answer_text": "Photosynthesis converts light energy into chemical energy stored in glucose.",
+      "maximum_marks": 5,
+      "source_pages": [1]
+    },
+    {
+      "question_id": "Q2",
+      "answer_text": "Evaporation is the change of liquid water into water vapour caused by heat.",
+      "maximum_marks": 4,
+      "source_pages": [1]
+    },
+    {
+      "question_id": "Q3(a)",
+      "answer_text": "An acid turns blue litmus paper red.",
+      "maximum_marks": 3,
+      "source_pages": [2]
+    },
+    {
+      "question_id": "Q3(b)",
+      "answer_text": "A base turns red litmus paper blue.",
+      "maximum_marks": 3,
+      "source_pages": [2]
+    }
+  ]
+}
