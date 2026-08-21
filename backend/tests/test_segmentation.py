@@ -30,7 +30,8 @@ class SegmentationTests(unittest.TestCase):
 
     def test_subquestions(self):
         result = self.segment([{"page_number": 1, "elements": [text("Q3(a) Alpha"), text("Q3(b) Beta")]}])
-        self.assertEqual([question["question_id"] for question in result["questions"]], ["Q3(a)", "Q3(b)"])
+        self.assertEqual([question["question_id"] for question in result["questions"]], ["Q3"])
+        self.assertEqual(result["questions"][0]["answer_text"], "Alpha\nBeta")
 
     def test_answer_continues_on_next_page(self):
         result = self.segment([

@@ -44,8 +44,8 @@ class BaselineGradingTests(unittest.TestCase):
 
     def test_unrelated_answer_has_low_similarity(self):
         result = self.grade_fixture({"Q3": "Q3(a) The moon is made of cheese."})
-        q3a = result["questions"][2]
-        self.assertLess(q3a["similarity_score"], 50)
+        q3 = result["questions"][2]
+        self.assertLess(q3["similarity_score"], 50)
 
     def test_missing_answer_is_scored_zero(self):
         with tempfile.TemporaryDirectory() as directory:

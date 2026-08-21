@@ -108,41 +108,149 @@ def _parse_text(text: str, config: AnswerKeyParseConfig) -> list[dict[str, Any]]
     return _parse_pages(pages, config)
 
 
+# Banner/noise lines that may appear in answer key OCR output (same as ocr_service).
+_ANSWER_KEY_NOISE_PREFIXES = (
+    "loading model", "exiting", "build", "ftype", "modalities",
+    "available commands", "/exit", "/regen", "/clear", "/read",
+    "/glob", "/image", "/video", "loaded media",
+)
+_ANSWER_KEY_BLOCK_CHARS = re.compile(r"^[\u2580-\u259f\s]+$")
+# Circled digit map (mirrors segmentation.py) for answer key OCR output.
+_CIRCLED_DIGIT_MAP: dict[str, int] = {
+    **{chr(0x2460 + i): i + 1 for i in range(20)},
+    **{chr(0x2474 + i): i + 1 for i in range(20)},
+    **{chr(0x2488 + i): i + 1 for i in range(10)},
+}
+_CIRCLED_RE = re.compile(r"^\s*(?P<circled>[\u2460-\u2473\u2474-\u247d\u2488-\u2491])\s*(?P<remaining>.*)$")
+
+
+def _is_noise_line(text: str) -> bool:
+    """Return True if a text line is a llama-cli banner artifact, not answer content."""
+    lower = text.strip().lower()
+    if not lower:
+        return True
+    if lower.startswith(_ANSWER_KEY_NOISE_PREFIXES):
+        return True
+    if _ANSWER_KEY_BLOCK_CHARS.match(text):
+        return True
+    # Key-value diagnostic lines like "model      : ..." or "build      : ..."
+    if re.match(r"^[a-z_]+\s*:\s", lower):
+        return True
+    # Interactive prompt echo "> OCR:"
+    if lower.startswith("> ocr:") or lower == "ocr:":
+        return True
+    return False
+
+
+def _marker_match_with_circled(text: str, marker: re.Pattern) -> re.Match | None:
+    """Try circled-digit prefix first, then the standard marker pattern."""
+    circled = _CIRCLED_RE.match(text)
+    if circled:
+        num = _CIRCLED_DIGIT_MAP.get(circled.group("circled"))
+        if num is not None:
+            return marker.match(f"{num} {circled.group('remaining')}")
+    return marker.match(text)
+
+
+# Strong instruction/question keywords unlikely to appear at the START of a body paragraph.
+_QUESTION_KEYWORDS = re.compile(
+    r"\b(how|what|why|explain|describe|discuss|analyse|analyze"
+    r"|compare|define|evaluate|elaborate|differentiate|illustrate|justify|outline"
+    r"|mention|write|prove|derive|calculate|solve)\b",
+    re.IGNORECASE,
+)
+_QUESTION_KEYWORD_WINDOW = 60
+
+
+def _is_question_header(match: re.Match, original_text: str) -> bool:
+    """Return True if this marker looks like a real question boundary.
+
+    Rules (any one is sufficient):
+    1. Has an explicit Q/Question prefix.
+    2. First 60 chars of remaining text contain a strong question keyword.
+    3. Is a circled digit (always a question boundary in exam notation).
+    4. Has a subquestion letter.
+    """
+    remaining = match.group("remaining").strip()
+    lower_orig = original_text.strip().lower()
+    if re.match(r"^(q\s*\d|question\s*\d)", lower_orig):
+        return True
+    if _CIRCLED_RE.match(original_text):
+        return True
+    if match.groupdict().get("subquestion"):
+        return True
+    if _QUESTION_KEYWORDS.search(remaining[:_QUESTION_KEYWORD_WINDOW]):
+        return True
+    return False
+
+
 def _parse_pages(pages: list[dict[str, Any]], config: AnswerKeyParseConfig) -> list[dict[str, Any]]:
+    """Parse normalized OCR pages into answer key questions.
+
+    Key behaviours:
+    * Filters out llama-cli banner/noise lines that may survive in OCR output.
+    * Handles circled-digit question markers (① ② …) produced by OCR.
+    * **Merges** all fragments that share the same question_id into one entry,
+      so that multi-page answers for Q1 / Q2 are not split into Q1-fragment-1,
+      Q1-fragment-2, etc.  The merged order follows document order.
+    """
     marker = re.compile(config.marker_pattern, re.IGNORECASE)
-    questions: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
+    # Ordered dict: question_id -> {question_id, _parts, source_pages}
+    merged: dict[str, dict[str, Any]] = {}
+    current_id: str | None = None
+
     for page in pages:
         page_number = page.get("page_number")
         for element in page.get("elements", []):
+            if element.get("type") != "text":
+                continue
             text = element.get("text")
-            match = marker.match(text) if element.get("type") == "text" and isinstance(text, str) else None
-            if match:
-                question_id = f"Q{match.group('number')}"
-                subquestion = match.groupdict().get("subquestion")
-                if subquestion:
-                    question_id += f"({subquestion.lower()})"
-                current = {"question_id": question_id, "_parts": [], "source_pages": [page_number]}
-                questions.append(current)
-                remaining = match.group("remaining").strip()
-                if remaining:
-                    current["_parts"].append(remaining)
-            elif current is not None and element.get("type") == "text" and isinstance(text, str) and text.strip():
-                current["_parts"].append(text.strip())
-                if page_number not in current["source_pages"]:
-                    current["source_pages"].append(page_number)
-    parsed = []
-    for question in questions:
-        question_id = question["question_id"]
-        parsed.append(
-            {
-                "question_id": question_id,
-                "answer_text": "\n".join(question["_parts"]),
-                "maximum_marks": config.maximum_marks.get(question_id),
-                "source_pages": question["source_pages"],
-            }
-        )
-    return parsed
+            if not isinstance(text, str) or not text.strip():
+                continue
+            # Drop banner / noise lines.
+            if _is_noise_line(text):
+                continue
+
+            match = _marker_match_with_circled(text, marker)
+            if match and _is_question_header(match, text):
+                parent_id = f"Q{match.group('number')}"
+                is_subpart = bool(match.groupdict().get("subquestion"))
+
+                if is_subpart and current_id == parent_id:
+                    # Sub-part of the question already being collected — fold in.
+                    remaining = match.group("remaining").strip()
+                    if remaining:
+                        merged[current_id]["_parts"].append(remaining)
+                    if page_number not in merged[current_id]["source_pages"]:
+                        merged[current_id]["source_pages"].append(page_number)
+                else:
+                    # New question (or new parent after subparts).
+                    current_id = parent_id
+                    if current_id not in merged:
+                        merged[current_id] = {
+                            "question_id": current_id,
+                            "_parts": [],
+                            "source_pages": [],
+                        }
+                    remaining = match.group("remaining").strip()
+                    if remaining:
+                        merged[current_id]["_parts"].append(remaining)
+                    if page_number not in merged[current_id]["source_pages"]:
+                        merged[current_id]["source_pages"].append(page_number)
+            elif current_id is not None:
+                merged[current_id]["_parts"].append(text.strip())
+                if page_number not in merged[current_id]["source_pages"]:
+                    merged[current_id]["source_pages"].append(page_number)
+
+    return [
+        {
+            "question_id": q["question_id"],
+            "answer_text": "\n".join(q["_parts"]),
+            "maximum_marks": config.maximum_marks.get(q["question_id"]),
+            "source_pages": q["source_pages"],
+        }
+        for q in merged.values()
+    ]
 
 
 def _structured_question(value: Any, config: AnswerKeyParseConfig) -> dict[str, Any]:

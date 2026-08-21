@@ -17,14 +17,14 @@ class SyntheticFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = parse_answer_key_file(ANSWER_KEY_FIXTURE, Path(directory) / "keys")
             payload = json.loads(Path(result.answer_key_path).read_text(encoding="utf-8"))
-        self.assertEqual([item["question_id"] for item in payload["questions"]], ["Q1", "Q2", "Q3(a)", "Q3(b)"])
-        self.assertEqual([item["maximum_marks"] for item in payload["questions"]], [5, 4, 3, 3])
+        self.assertEqual([item["question_id"] for item in payload["questions"]], ["Q1", "Q2", "Q3"])
+        self.assertEqual([item["maximum_marks"] for item in payload["questions"]], [5, 4, 6])
 
     def test_student_fixture_segments_to_corresponding_questions(self):
         with tempfile.TemporaryDirectory() as directory:
             result = segment_normalized_document(STUDENT_FIXTURE, Path(directory) / "segments")
             payload = json.loads(Path(result.segmentation_path).read_text(encoding="utf-8"))
-        self.assertEqual([item["question_id"] for item in payload["questions"]], ["Q1", "Q2", "Q3(a)", "Q3(b)"])
+        self.assertEqual([item["question_id"] for item in payload["questions"]], ["Q1", "Q2", "Q3"])
         self.assertEqual(payload["questions"][2]["source_pages"], [2])
 
 

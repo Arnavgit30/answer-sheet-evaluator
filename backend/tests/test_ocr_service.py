@@ -134,6 +134,11 @@ class OCRServiceTests(unittest.TestCase):
             "http://llama.test:8111/health",
         )
 
+    def test_respects_llama_cli_env_var(self):
+        with patch.dict("os.environ", {"LLAMA_CLI": r"C:\custom\path\llama-cli.exe"}):
+            service = LlamaCppOCRService()
+            self.assertEqual(service.cli_path, r"C:\custom\path\llama-cli.exe")
+
 
 if __name__ == "__main__":
     unittest.main()

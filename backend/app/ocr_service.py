@@ -17,9 +17,9 @@ from backend.app.preprocessing import PreprocessedDocument
 
 
 DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8111"
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_LLAMA_CLI = "llama-cli"
+DEFAULT_LLAMA_CLI = os.getenv("LLAMA_CLI") or os.getenv("LLAMA_CLI_PATH") or "llama-cli"
 DEFAULT_LLAMA_MODEL = _PROJECT_ROOT / "models" / "paddleocr-vl-gguf" / "PaddleOCR-VL-1.6-GGUF.gguf"
 DEFAULT_LLAMA_MMPROJ = _PROJECT_ROOT / "models" / "paddleocr-vl-gguf" / "PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
 TRANSCRIPTION_PROMPT = (
@@ -52,7 +52,7 @@ class LlamaCppOCRService:
     ) -> None:
         self.server_url = (server_url or os.getenv("LLAMA_CPP_SERVER_URL") or DEFAULT_LLAMA_SERVER_URL).rstrip("/")
         self.timeout_seconds = timeout_seconds
-        self.cli_path = cli_path or os.getenv("LLAMA_CLI_PATH") or DEFAULT_LLAMA_CLI
+        self.cli_path = cli_path or os.getenv("LLAMA_CLI") or os.getenv("LLAMA_CLI_PATH") or DEFAULT_LLAMA_CLI
         self.model_path = model_path or os.getenv("LLAMA_CPP_MODEL_PATH") or str(DEFAULT_LLAMA_MODEL)
         self.mmproj_path = mmproj_path or os.getenv("LLAMA_CPP_MMPROJ_PATH") or str(DEFAULT_LLAMA_MMPROJ)
 
@@ -111,7 +111,8 @@ class LlamaCppOCRService:
             result = subprocess.run(
                 command,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.timeout_seconds,
                 check=False,
             )
@@ -123,25 +124,50 @@ class LlamaCppOCRService:
         return _paddle_compatible_page(transcription)
 
 
+# Patterns that match llama-cli startup/banner lines (never OCR content).
+_LLAMA_BANNER_PREFIXES = (
+    "llama_", "main:", "system_info:", "load_tensors:", "print_info:",
+    "common_", "sampler", "sampling", "prompt eval", "eval time",
+    "prompt processing", "build", "model", "ftype", "modalities",
+    "available commands", "/exit", "/regen", "/clear", "/read",
+    "/glob", "/image", "/video", "loaded media", "loading model",
+    "exiting",
+)
+# Block-graphic chars used in the llama-cli ASCII-art logo.
+_BLOCK_CHARS = re.compile(r"^[\u2580-\u259f\s]+$")
+# ANSI escape codes.
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
 def _clean_llama_output(stdout: str) -> str:
-    """Remove llama-cli prompt echo, diagnostics, and timing lines."""
+    """Remove llama-cli prompt echo, banner, diagnostics, and timing lines."""
+    lines = _ANSI.sub("", stdout).splitlines()
+    has_prompt = any(re.match(r"(?i)^>\s*ocr:", line.strip()) for line in lines)
+
     cleaned: list[str] = []
-    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-    diagnostic_prefixes = (
-        "llama_", "main:", "system_info:", "load_tensors:", "print_info:",
-        "common_", "sampler", "sampling", "prompt eval", "eval time", "prompt processing",
-    )
-    for raw_line in ansi.sub("", stdout).splitlines():
+    past_prompt = False
+
+    for raw_line in lines:
         line = raw_line.strip()
         lower = line.lower()
-        if not line or lower.startswith(diagnostic_prefixes) or "timing" in lower:
+
+        if has_prompt:
+            if lower.startswith("> ocr:"):
+                past_prompt = True
+                after = line[line.index(":") + 1:].strip()
+                if after:
+                    cleaned.append(after)
+                continue
+            if not past_prompt:
+                continue
+        
+        if not line or lower.startswith(_LLAMA_BANNER_PREFIXES) or _BLOCK_CHARS.match(line):
             continue
-        if line == "OCR:":
+        if re.match(r"^[a-z_]+\s*:\s", lower):
             continue
-        if line.startswith("OCR:"):
-            line = line[len("OCR:"):].lstrip()
-        if line:
-            cleaned.append(line)
+            
+        cleaned.append(line)
+
     return "\n".join(cleaned)
 
 

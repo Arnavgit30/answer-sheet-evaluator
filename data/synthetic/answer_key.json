@@ -13,15 +13,9 @@
       "source_pages": [1]
     },
     {
-      "question_id": "Q3(a)",
-      "answer_text": "An acid turns blue litmus paper red.",
-      "maximum_marks": 3,
-      "source_pages": [2]
-    },
-    {
-      "question_id": "Q3(b)",
-      "answer_text": "A base turns red litmus paper blue.",
-      "maximum_marks": 3,
+      "question_id": "Q3",
+      "answer_text": "An acid turns blue litmus paper red.\nA base turns red litmus paper blue.",
+      "maximum_marks": 6,
       "source_pages": [2]
     }
   ]

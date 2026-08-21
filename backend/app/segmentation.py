@@ -16,6 +16,55 @@ DEFAULT_MARKER_PATTERN = (
     r"\s*(?:[.:-])?(?=\s|$)(?P<remaining>.*)$"
 )
 
+# Unicode circled digits ① (U+2460) through ⑳ (U+2473),
+# and enclosed alphanumerics ⑴–⑽ (U+2474–U+247D), ⒈–⒑ (U+2488–U+2491).
+_CIRCLED_DIGIT_RE = re.compile(
+    r"^\s*(?P<circled>[\u2460-\u2473\u2474-\u247d\u2488-\u2491])\s*(?P<remaining>.*)$"
+)
+# Map circled char -> integer
+_CIRCLED_TO_INT: dict[str, int] = {
+    **{chr(0x2460 + i): i + 1 for i in range(20)},  # ①–⑳
+    **{chr(0x2474 + i): i + 1 for i in range(20)},  # ⑴–⑳
+    **{chr(0x2488 + i): i + 1 for i in range(10)},  # ⒈–⒑
+}
+
+# Strong instruction/question keywords unlikely to appear at the START of a body paragraph.
+# Deliberately excludes weak words (which, when, where, who, give, show, find, state)
+# that occur naturally mid-sentence in body text.
+_QUESTION_KEYWORDS = re.compile(
+    r"\b(how|what|why|explain|describe|discuss|analyse|analyze"
+    r"|compare|define|evaluate|elaborate|differentiate|illustrate|justify|outline"
+    r"|mention|write|prove|derive|calculate|solve)\b",
+    re.IGNORECASE,
+)
+# Only search the first 60 chars of remaining text — real question prompts have
+# the instruction word near the beginning, body sentences have it mid-sentence.
+_QUESTION_KEYWORD_WINDOW = 60
+
+
+def _is_question_header(match: re.Match, original_text: str) -> bool:
+    """Return True if this marker looks like a real exam question boundary.
+
+    Prevents numbered sub-sections inside an answer body (e.g. '1. HPC clusters:')
+    from being misidentified as new question markers.  Any one rule is sufficient:
+    1. Has explicit Q/Question prefix.
+    2. First 60 chars of remaining text contain a strong question keyword.
+    3. Is a circled-digit marker (exam notation).
+    4. Has a subquestion letter.
+    """
+    remaining = match.group("remaining").strip()
+    lower_orig = original_text.strip().lower()
+    if re.match(r"^(q\s*\d|question\s*\d)", lower_orig):
+        return True
+    if _CIRCLED_DIGIT_RE.match(original_text):
+        return True
+    if match.groupdict().get("subquestion"):
+        return True
+    # Only look in first window chars to avoid mid-sentence words triggering false positives.
+    if _QUESTION_KEYWORDS.search(remaining[:_QUESTION_KEYWORD_WINDOW]):
+        return True
+    return False
+
 
 @dataclass
 class SegmentationConfig:
@@ -59,12 +108,22 @@ def segment_normalized_document(
         for element in page.get("elements", []):
             match = _question_match(element, marker)
             if match:
-                current = _new_question(match, page_number)
-                questions.append(current)
-                _append_element(current, page_number, element)
-                remaining = match.group("remaining").strip()
-                if remaining:
-                    current["_answer_parts"].append(remaining)
+                parent_id = f"Q{match.group('number')}"
+                is_subpart = bool(match.groupdict().get("subquestion"))
+                # If this is a subpart of the question already being collected, fold in.
+                if is_subpart and current is not None and current["question_id"] == parent_id:
+                    _append_element(current, page_number, element)
+                    remaining = match.group("remaining").strip()
+                    if remaining:
+                        current["_answer_parts"].append(remaining)
+                else:
+                    # New main question (or first subpart of a new parent).
+                    current = _new_question(parent_id, page_number)
+                    questions.append(current)
+                    _append_element(current, page_number, element)
+                    remaining = match.group("remaining").strip()
+                    if remaining:
+                        current["_answer_parts"].append(remaining)
                 continue
 
             if current is None:
@@ -90,13 +149,22 @@ def segment_normalized_document(
 def _question_match(element: dict[str, Any], marker: re.Pattern[str]) -> re.Match[str] | None:
     if element.get("type") != "text" or not isinstance(element.get("text"), str):
         return None
-    return marker.match(element["text"])
+    text = element["text"]
+    # Try circled-digit markers first (e.g. ① produced by OCR from handwritten sheets).
+    circled = _CIRCLED_DIGIT_RE.match(text)
+    if circled:
+        num = _CIRCLED_TO_INT.get(circled.group("circled"))
+        if num is not None:
+            m = marker.match(f"{num} {circled.group('remaining')}")
+            if m and _is_question_header(m, text):
+                return m
+    m = marker.match(text)
+    if m and _is_question_header(m, text):
+        return m
+    return None
 
 
-def _new_question(match: re.Match[str], page_number: Any) -> dict[str, Any]:
-    number = match.group("number")
-    subquestion = match.groupdict().get("subquestion")
-    question_id = f"Q{number}" + (f"({subquestion.lower()})" if subquestion else "")
+def _new_question(question_id: str, page_number: Any) -> dict[str, Any]:
     return {
         "question_id": question_id,
         "answer_text": "",

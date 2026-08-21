@@ -19,7 +19,7 @@ class AnswerKeyParserTests(unittest.TestCase):
         self.assertFalse(first.cached)
         self.assertTrue(second.cached)
         self.assertEqual(result["questions"][0], {"question_id": "Q1", "answer_text": "First key answer", "maximum_marks": 5, "source_pages": [1]})
-        self.assertEqual(result["questions"][1]["question_id"], "Q2(a)")
+        self.assertEqual(result["questions"][1]["question_id"], "Q2")
         self.assertEqual(result["questions"][1]["answer_text"], "Sub answer\ncontinued")
         self.assertIsNone(result["questions"][1]["maximum_marks"])
 
