@@ -34,6 +34,39 @@ class FakeEvaluationService:
             "benchmark": {"status": "ground_truth_unavailable"},
         }
 
+    def get_questions(self, evaluation_id):
+        if evaluation_id != "evaluation_001":
+            return []
+        return [{"question_id": "Q1", "student_answer": {"text": "Ans"}}]
+
+    def get_question_detail(self, evaluation_id, question_id):
+        if evaluation_id == "evaluation_001" and question_id == "Q1":
+            return {"question_id": "Q1", "student_answer": {"text": "Ans"}}
+        return None
+
+    def get_ocr_reviews(self, evaluation_id):
+        if evaluation_id != "evaluation_001":
+            return []
+        return [{"review_id": "rev_ocr_1", "question_id": "Q1", "reviewer_action": "pending"}]
+
+    def update_ocr_review(self, evaluation_id, review_id, action, corrected_text=None):
+        if evaluation_id == "evaluation_001" and review_id == "rev_ocr_1":
+            return {"review_id": review_id, "reviewer_action": action, "corrected_text": corrected_text}
+        return None
+
+    def get_grading_reviews(self, evaluation_id):
+        if evaluation_id != "evaluation_001":
+            return []
+        return [{"review_id": "rev_gr_1", "question_id": "Q1", "reviewer_action": "pending"}]
+
+    def update_grading_review(self, evaluation_id, review_id, action, human_marks=None, notes=None):
+        if evaluation_id == "evaluation_001" and review_id == "rev_gr_1":
+            return {"review_id": review_id, "reviewer_action": action, "human_marks": human_marks}
+        return None
+
+    def get_page_image_path(self, evaluation_id, page_number):
+        return None
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -56,6 +89,40 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(results.status_code, 200)
         self.assertEqual(results.json()["grading"]["grading_method"], "baseline_similarity")
+
+    def test_question_detail_endpoints(self):
+        res = self.client.get("/api/v1/evaluations/evaluation_001/questions")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.json()), 1)
+        self.assertEqual(res.json()[0]["question_id"], "Q1")
+
+        q1 = self.client.get("/api/v1/evaluations/evaluation_001/questions/Q1")
+        self.assertEqual(q1.status_code, 200)
+        self.assertEqual(q1.json()["question_id"], "Q1")
+
+    def test_ocr_review_endpoints(self):
+        revs = self.client.get("/api/v1/evaluations/evaluation_001/ocr-reviews")
+        self.assertEqual(revs.status_code, 200)
+        self.assertEqual(len(revs.json()), 1)
+
+        updated = self.client.post(
+            "/api/v1/evaluations/evaluation_001/ocr-reviews/rev_ocr_1",
+            json={"action": "corrected", "corrected_text": "Fixed text"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["action" if "action" in updated.json() else "reviewer_action"], "corrected")
+
+    def test_grading_review_endpoints(self):
+        revs = self.client.get("/api/v1/evaluations/evaluation_001/grading-reviews")
+        self.assertEqual(revs.status_code, 200)
+        self.assertEqual(len(revs.json()), 1)
+
+        updated = self.client.post(
+            "/api/v1/evaluations/evaluation_001/grading-reviews/rev_gr_1",
+            json={"action": "overridden", "human_marks": 4.5},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["human_marks"], 4.5)
 
 
 if __name__ == "__main__":

@@ -56,8 +56,8 @@ def _normalize_page(raw_page: dict[str, Any]) -> dict[str, Any]:
     return {
         "page_number": raw_page.get("page_number"),
         "source_file": raw_page.get("processed_file"),
-        "width": paddle.get("width"),
-        "height": paddle.get("height"),
+        "width": raw_page.get("width") or paddle.get("width"),
+        "height": raw_page.get("height") or paddle.get("height"),
         "elements": elements,
     }
 
@@ -78,8 +78,10 @@ def _normalize_block(block: dict[str, Any]) -> dict[str, Any]:
 
 def _element_type(label: object) -> str:
     value = str(label or "unknown").lower()
-    if value in {"image", "figure", "chart", "table"}:
-        return "figure" if value in {"image", "figure", "chart"} else "table"
+    if value in {"image", "figure", "chart"}:
+        return "figure"
+    if value in {"table", "formula", "diagram"}:
+        return value
     return value
 
 

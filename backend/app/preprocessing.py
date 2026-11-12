@@ -20,6 +20,8 @@ class ProcessedPage:
     page_number: int
     source_file: str
     processed_file: str
+    width: int | None = None
+    height: int | None = None
 
 
 @dataclass
@@ -53,7 +55,8 @@ def preprocess_document(document: Document, output_root: str | Path) -> Preproce
         elif suffix in {".png", ".jpg", ".jpeg"}:
             destination = document_dir / f"page_{page_number:03d}{suffix}"
             shutil.copy2(source, destination)
-            pages.append(ProcessedPage(page_number, str(source.resolve()), str(destination.resolve())))
+            width, height = _image_dimensions(destination)
+            pages.append(ProcessedPage(page_number, str(source.resolve()), str(destination.resolve()), width, height))
             page_number += 1
         else:
             raise ValueError(f"Unsupported input file: {source}")
@@ -67,6 +70,15 @@ def preprocess_document(document: Document, output_root: str | Path) -> Preproce
     return PreprocessedDocument(document.document_id, pages, cached=False)
 
 
+def _image_dimensions(image_path: Path) -> tuple[int | None, int | None]:
+    try:
+        from PIL import Image
+        with Image.open(image_path) as img:
+            return img.size
+    except Exception:
+        return None, None
+
+
 def _render_pdf(source: Path, destination_dir: Path, start_page: int) -> list[ProcessedPage]:
     # Import only when PDF processing is requested, keeping image-only use lightweight.
     import fitz
@@ -76,8 +88,17 @@ def _render_pdf(source: Path, destination_dir: Path, start_page: int) -> list[Pr
         for index, pdf_page in enumerate(pdf):
             page_number = start_page + index
             destination = destination_dir / f"page_{page_number:03d}.png"
-            pdf_page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False).save(destination)
-            pages.append(ProcessedPage(page_number, str(source.resolve()), str(destination.resolve())))
+            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            pix.save(destination)
+            pages.append(
+                ProcessedPage(
+                    page_number,
+                    str(source.resolve()),
+                    str(destination.resolve()),
+                    width=pix.width,
+                    height=pix.height,
+                )
+            )
     return pages
 
 

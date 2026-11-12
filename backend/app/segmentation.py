@@ -10,60 +10,17 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_MARKER_PATTERN = (
-    r"^\s*(?:question\s*)?(?:q\s*)?(?P<number>\d+)"
-    r"\s*(?:\(\s*(?P<subquestion>[A-Za-z])\s*\))?"
-    r"\s*(?:[.:-])?(?=\s|$)(?P<remaining>.*)$"
+from backend.app.question_detector import (
+    DEFAULT_MARKER_PATTERN,
+    _CIRCLED_DIGIT_RE,
+    _CIRCLED_TO_INT,
+    _EXPLICIT_PREFIX_RE,
+    _QUESTION_KEYWORDS,
+    _QUESTION_KEYWORD_WINDOW,
+    is_noise_line as _is_noise_line,
+    is_question_header as _is_question_header,
+    match_question_marker,
 )
-
-# Unicode circled digits ① (U+2460) through ⑳ (U+2473),
-# and enclosed alphanumerics ⑴–⑽ (U+2474–U+247D), ⒈–⒑ (U+2488–U+2491).
-_CIRCLED_DIGIT_RE = re.compile(
-    r"^\s*(?P<circled>[\u2460-\u2473\u2474-\u247d\u2488-\u2491])\s*(?P<remaining>.*)$"
-)
-# Map circled char -> integer
-_CIRCLED_TO_INT: dict[str, int] = {
-    **{chr(0x2460 + i): i + 1 for i in range(20)},  # ①–⑳
-    **{chr(0x2474 + i): i + 1 for i in range(20)},  # ⑴–⑳
-    **{chr(0x2488 + i): i + 1 for i in range(10)},  # ⒈–⒑
-}
-
-# Strong instruction/question keywords unlikely to appear at the START of a body paragraph.
-# Deliberately excludes weak words (which, when, where, who, give, show, find, state)
-# that occur naturally mid-sentence in body text.
-_QUESTION_KEYWORDS = re.compile(
-    r"\b(how|what|why|explain|describe|discuss|analyse|analyze"
-    r"|compare|define|evaluate|elaborate|differentiate|illustrate|justify|outline"
-    r"|mention|write|prove|derive|calculate|solve)\b",
-    re.IGNORECASE,
-)
-# Only search the first 60 chars of remaining text — real question prompts have
-# the instruction word near the beginning, body sentences have it mid-sentence.
-_QUESTION_KEYWORD_WINDOW = 60
-
-
-def _is_question_header(match: re.Match, original_text: str) -> bool:
-    """Return True if this marker looks like a real exam question boundary.
-
-    Prevents numbered sub-sections inside an answer body (e.g. '1. HPC clusters:')
-    from being misidentified as new question markers.  Any one rule is sufficient:
-    1. Has explicit Q/Question prefix.
-    2. First 60 chars of remaining text contain a strong question keyword.
-    3. Is a circled-digit marker (exam notation).
-    4. Has a subquestion letter.
-    """
-    remaining = match.group("remaining").strip()
-    lower_orig = original_text.strip().lower()
-    if re.match(r"^(q\s*\d|question\s*\d)", lower_orig):
-        return True
-    if _CIRCLED_DIGIT_RE.match(original_text):
-        return True
-    if match.groupdict().get("subquestion"):
-        return True
-    # Only look in first window chars to avoid mid-sentence words triggering false positives.
-    if _QUESTION_KEYWORDS.search(remaining[:_QUESTION_KEYWORD_WINDOW]):
-        return True
-    return False
 
 
 @dataclass
@@ -102,11 +59,17 @@ def segment_normalized_document(
     questions: list[dict[str, Any]] = []
     unassigned_elements: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
+    seen_ids: set[str] = set()  # Track which question IDs we've seen.
 
     for page in normalized.get("pages", []):
         page_number = page.get("page_number")
         for element in page.get("elements", []):
-            match = _question_match(element, marker)
+            # Filter banner / noise lines before question matching.
+            if element.get("type") == "text" and isinstance(element.get("text"), str):
+                if _is_noise_line(element["text"]):
+                    continue
+
+            match = _question_match(element, marker, seen_ids)
             if match:
                 parent_id = f"Q{match.group('number')}"
                 is_subpart = bool(match.groupdict().get("subquestion"))
@@ -120,6 +83,7 @@ def segment_normalized_document(
                     # New main question (or first subpart of a new parent).
                     current = _new_question(parent_id, page_number)
                     questions.append(current)
+                    seen_ids.add(parent_id)
                     _append_element(current, page_number, element)
                     remaining = match.group("remaining").strip()
                     if remaining:
@@ -146,22 +110,14 @@ def segment_normalized_document(
     return SegmentedDocument(document_id, str(output_path.resolve()), len(questions), cached=False)
 
 
-def _question_match(element: dict[str, Any], marker: re.Pattern[str]) -> re.Match[str] | None:
+def _question_match(
+    element: dict[str, Any],
+    marker: re.Pattern[str],
+    seen_ids: set[str] | None = None,
+) -> re.Match[str] | None:
     if element.get("type") != "text" or not isinstance(element.get("text"), str):
         return None
-    text = element["text"]
-    # Try circled-digit markers first (e.g. ① produced by OCR from handwritten sheets).
-    circled = _CIRCLED_DIGIT_RE.match(text)
-    if circled:
-        num = _CIRCLED_TO_INT.get(circled.group("circled"))
-        if num is not None:
-            m = marker.match(f"{num} {circled.group('remaining')}")
-            if m and _is_question_header(m, text):
-                return m
-    m = marker.match(text)
-    if m and _is_question_header(m, text):
-        return m
-    return None
+    return match_question_marker(element["text"], marker, seen_ids)
 
 
 def _new_question(question_id: str, page_number: Any) -> dict[str, Any]:

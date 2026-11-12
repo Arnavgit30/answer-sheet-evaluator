@@ -2,30 +2,49 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
-import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from backend.app.preprocessing import PreprocessedDocument
 
-
-DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8111"
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 600
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_LLAMA_CLI = os.getenv("LLAMA_CLI") or os.getenv("LLAMA_CLI_PATH") or "llama-cli"
 DEFAULT_LLAMA_MODEL = _PROJECT_ROOT / "models" / "paddleocr-vl-gguf" / "PaddleOCR-VL-1.6-GGUF.gguf"
 DEFAULT_LLAMA_MMPROJ = _PROJECT_ROOT / "models" / "paddleocr-vl-gguf" / "PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
 TRANSCRIPTION_PROMPT = (
     "Read this handwritten answer sheet image. Transcribe all visible text exactly. "
     "Preserve question numbers and describe any diagrams."
 )
+
+# Global lazy-loaded instances
+_LLM_INSTANCE = None
+
+
+def _get_llm_instance(model_path: str, mmproj_path: str) -> Any:
+    global _LLM_INSTANCE
+    if _LLM_INSTANCE is None:
+        try:
+            from llama_cpp import Llama
+            from llama_cpp.llama_chat_format import Llava15ChatHandler
+        except ImportError as exc:
+            raise RuntimeError(
+                "llama-cpp-python is required to run the local pipeline. "
+                "Please run `pip install llama-cpp-python`."
+            ) from exc
+
+        chat_handler = Llava15ChatHandler(clip_model_path=mmproj_path)
+        _LLM_INSTANCE = Llama(
+            model_path=model_path,
+            chat_handler=chat_handler,
+            n_ctx=4096,
+            verbose=False,
+        )
+    return _LLM_INSTANCE
 
 
 @dataclass
@@ -40,19 +59,13 @@ class OCRDocument:
 
 
 class LlamaCppOCRService:
-    """Send document images to the already-running local llama.cpp server."""
+    """Run local inference using llama-cpp-python, avoiding PEG-native HTTP parsing errors."""
 
     def __init__(
         self,
-        server_url: str | None = None,
-        timeout_seconds: int | float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
-        cli_path: str | None = None,
         model_path: str | None = None,
         mmproj_path: str | None = None,
     ) -> None:
-        self.server_url = (server_url or os.getenv("LLAMA_CPP_SERVER_URL") or DEFAULT_LLAMA_SERVER_URL).rstrip("/")
-        self.timeout_seconds = timeout_seconds
-        self.cli_path = cli_path or os.getenv("LLAMA_CLI") or os.getenv("LLAMA_CLI_PATH") or DEFAULT_LLAMA_CLI
         self.model_path = model_path or os.getenv("LLAMA_CPP_MODEL_PATH") or str(DEFAULT_LLAMA_MODEL)
         self.mmproj_path = mmproj_path or os.getenv("LLAMA_CPP_MMPROJ_PATH") or str(DEFAULT_LLAMA_MMPROJ)
 
@@ -63,6 +76,9 @@ class LlamaCppOCRService:
         state = [_page_state(page.processed_file) for page in document.pages]
         if _is_current_cache(raw_path, document.document_id, state):
             return OCRDocument(document.document_id, str(raw_path.resolve()), len(document.pages), cached=True)
+
+        # Pre-load model to catch errors early
+        _get_llm_instance(self.model_path, self.mmproj_path)
 
         raw_pages = []
         for page, page_state in zip(document.pages, state):
@@ -87,40 +103,38 @@ class LlamaCppOCRService:
         return OCRDocument(document.document_id, str(raw_path.resolve()), len(raw_pages), cached=False)
 
     def health_check(self) -> bool:
-        """Return whether the configured llama.cpp server responds to /health."""
+        """Return whether the model can be loaded."""
         try:
-            response = requests.get(f"{self.server_url}/health", timeout=self.timeout_seconds)
-            return 200 <= response.status_code < 300
-        except requests.RequestException:
+            _get_llm_instance(self.model_path, self.mmproj_path)
+            return True
+        except Exception:
             return False
 
     def _ocr_page(self, page_path: str) -> dict[str, Any]:
-        command = [
-             self.cli_path,
-            "-m", self.model_path,
-            "--mmproj", self.mmproj_path,
-            "--image", str(Path(page_path)),
-            "-p", "OCR:",
-            "-n", "512",
-            "--temp", "0",
-            "--single-turn",
-            "--no-display-prompt",
-            "--no-show-timings",
-]
+        llm = _get_llm_instance(self.model_path, self.mmproj_path)
+        
+        image_data = base64.b64encode(Path(page_path).read_bytes()).decode("ascii")
+        suffix = Path(page_path).suffix.lower().lstrip(".")
+        mime = "image/png" if suffix == "png" else "image/jpeg"
+
         try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout_seconds,
-                check=False,
+            response = llm.create_chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_data}"}},
+                            {"type": "text", "text": "OCR:"},
+                        ],
+                    }
+                ],
+                max_tokens=512,
+                temperature=0,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"llama-cli OCR request failed: {exc}") from exc
-        if result.returncode != 0:
-            raise RuntimeError(f"llama-cli OCR request failed with exit code {result.returncode}: {result.stderr.strip()}")
-        transcription = _clean_llama_output(result.stdout)
+            transcription = response["choices"][0]["message"]["content"]
+        except Exception as exc:
+            raise RuntimeError(f"llama-cpp-python inference failed: {exc}") from exc
+
         return _paddle_compatible_page(transcription)
 
 

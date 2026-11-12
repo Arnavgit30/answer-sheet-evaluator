@@ -42,3 +42,15 @@ class EvaluationResultsResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = Field(default="ok")
+
+
+class OCRReviewActionRequest(BaseModel):
+    action: Literal["confirmed", "corrected"]
+    corrected_text: str | None = None
+    notes: str | None = None
+
+
+class GradingReviewActionRequest(BaseModel):
+    action: Literal["confirmed", "overridden"]
+    human_marks: float | None = None
+    notes: str | None = None

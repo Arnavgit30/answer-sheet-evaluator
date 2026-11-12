@@ -2,77 +2,45 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from backend.app.ocr_service import LlamaCppOCRService
 from backend.app.preprocessing import PreprocessedDocument, ProcessedPage
 
 
 class OCRServiceTests(unittest.TestCase):
-    def test_cli_image_and_writes_normalizer_compatible_output(self):
+    def _fake_response(self, text):
+        return {"choices": [{"message": {"content": text}}]}
+
+    def test_llama_cpp_transcribes_and_writes_normalizer_compatible_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            page_file = root / "page_001.jpg"
-            page_file.write_bytes(b"processed fixture")
+            page_file = root / "page_001.png"
+            page_file.write_bytes(b"PNG_FIXTURE")
 
             document = PreprocessedDocument(
                 "student_001",
-                [ProcessedPage(1, "source.jpg", str(page_file))],
+                [ProcessedPage(1, "source.png", str(page_file))],
                 cached=False,
             )
 
-            fake_result = type(
-                "FakeResult",
-                (),
-                {
-                    "returncode": 0,
-                    "stdout": "Q1. First answer\nQ2. Second answer\n",
-                    "stderr": "",
-                },
-            )()
+            mock_llm = MagicMock()
+            mock_llm.create_chat_completion.return_value = self._fake_response("Q1. First answer\nQ2. Second answer")
 
-            with patch(
-                "backend.app.ocr_service.subprocess.run",
-                return_value=fake_result,
-            ) as run:
-                service = LlamaCppOCRService(
-                    timeout_seconds=12,
-                    cli_path="llama-cli",
-                    model_path="model.gguf",
-                    mmproj_path="mmproj.gguf",
-                )
-
+            with patch("backend.app.ocr_service._get_llm_instance", return_value=mock_llm):
+                service = LlamaCppOCRService()
                 result = service.ocr_document(document, root / "ocr")
 
             self.assertFalse(result.cached)
+            self.assertTrue(mock_llm.create_chat_completion.called)
 
-            command = run.call_args.args[0]
+            call_kwargs = mock_llm.create_chat_completion.call_args.kwargs
+            self.assertEqual(call_kwargs["temperature"], 0)
+            self.assertEqual(call_kwargs["max_tokens"], 512)
 
-            self.assertEqual(command[0], "llama-cli")
-            self.assertIn("-m", command)
-            self.assertIn("model.gguf", command)
-            self.assertIn("--mmproj", command)
-            self.assertIn("mmproj.gguf", command)
-            self.assertIn("--image", command)
-            self.assertIn(str(page_file), command)
-            self.assertIn("-p", command)
-            self.assertIn("OCR:", command)
-            self.assertIn("-n", command)
-            self.assertIn("512", command)
-            self.assertIn("--temp", command)
-            self.assertIn("0", command)
-
-            self.assertEqual(
-                run.call_args.kwargs["timeout"],
-                12,
-            )
-
-            raw = json.loads(
-                Path(result.raw_ocr_path).read_text(encoding="utf-8")
-            )
-
+            # Verify output shape is normalizer-compatible.
+            raw = json.loads(Path(result.raw_ocr_path).read_text(encoding="utf-8"))
             blocks = raw["pages"][0]["paddle_output"]["parsing_res_list"]
-
             self.assertEqual(
                 [block["block_content"] for block in blocks],
                 ["Q1. First answer", "Q2. Second answer"],
@@ -81,63 +49,36 @@ class OCRServiceTests(unittest.TestCase):
     def test_reuses_raw_ocr_when_processed_page_is_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            page_file = root / "page_001.jpg"
-            page_file.write_bytes(b"processed fixture")
+            page_file = root / "page_001.png"
+            page_file.write_bytes(b"PNG_FIXTURE")
 
             document = PreprocessedDocument(
                 "student_001",
-                [ProcessedPage(1, "source.jpg", str(page_file))],
+                [ProcessedPage(1, "source.png", str(page_file))],
                 cached=False,
             )
 
-            fake_result = type(
-                "FakeResult",
-                (),
-                {
-                    "returncode": 0,
-                    "stdout": "Q1. Answer\n",
-                    "stderr": "",
-                },
-            )()
+            mock_llm = MagicMock()
+            mock_llm.create_chat_completion.return_value = self._fake_response("Q1. Answer")
 
-            with patch(
-                "backend.app.ocr_service.subprocess.run",
-                return_value=fake_result,
-            ) as run:
+            with patch("backend.app.ocr_service._get_llm_instance", return_value=mock_llm):
                 service = LlamaCppOCRService()
-
                 first = service.ocr_document(document, root / "ocr")
                 second = service.ocr_document(document, root / "ocr")
 
             self.assertFalse(first.cached)
             self.assertTrue(second.cached)
+            # Inference should only fire once; second call uses the cache.
+            self.assertEqual(mock_llm.create_chat_completion.call_count, 1)
 
-            # llama-cli should only run once because the second call uses cache.
-            self.assertEqual(run.call_count, 1)
+    def test_health_check_returns_true_when_model_loads(self):
+        mock_llm = MagicMock()
+        with patch("backend.app.ocr_service._get_llm_instance", return_value=mock_llm):
+            self.assertTrue(LlamaCppOCRService().health_check())
 
-    def test_health_check_uses_configured_server(self):
-        class FakeHTTPResponse:
-            status_code = 200
-
-        with patch(
-            "backend.app.ocr_service.requests.get",
-            return_value=FakeHTTPResponse(),
-        ) as get:
-            self.assertTrue(
-                LlamaCppOCRService(
-                    server_url="http://llama.test:8111"
-                ).health_check()
-            )
-
-        self.assertEqual(
-            get.call_args.args[0],
-            "http://llama.test:8111/health",
-        )
-
-    def test_respects_llama_cli_env_var(self):
-        with patch.dict("os.environ", {"LLAMA_CLI": r"C:\custom\path\llama-cli.exe"}):
-            service = LlamaCppOCRService()
-            self.assertEqual(service.cli_path, r"C:\custom\path\llama-cli.exe")
+    def test_health_check_returns_false_when_model_fails(self):
+        with patch("backend.app.ocr_service._get_llm_instance", side_effect=RuntimeError("load failed")):
+            self.assertFalse(LlamaCppOCRService().health_check())
 
 
 if __name__ == "__main__":
