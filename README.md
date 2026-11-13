@@ -1,852 +1,220 @@
-# Answer Sheet Evaluator
+# GradePilot — Answer Sheet Evaluator
 
-Local solution demo for evaluating handwritten answer sheets with a local llama.cpp PaddleOCR-VL server and a transparent baseline similarity grader.
+A local-first handwritten answer-sheet OCR and AI grading pipeline built with **FastAPI**, **React (Vite + Tailwind)**, **llama-cpp-python (`PaddleOCR-VL-1.6-GGUF`)**, and **OpenAI-compatible LLM grading (`qwen/qwen3.8-27b` on Groq by default)**.
 
-The OCR client uses `http://127.0.0.1:8111` by default. Set `LLAMA_CPP_SERVER_URL` to use another llama.cpp server URL.
+It supports both **direct UI file uploads** (one student answer sheet + one answer key per run) and **pre-configured local dataset manifests**, with SHA-256 caching across pipeline stages and **human-in-the-loop review gates** for low-confidence OCR and grading items.
 
-## Start FastAPI
+---
+
+## End-to-End Pipeline Architecture
+
+```text
+React UI (File Upload or Dataset Config)
+  │
+  ▼  POST /api/v1/uploads  or  POST /api/v1/datasets/validate
+FastAPI (backend/app/api.py -> EvaluationService)
+  │
+  ├─► 1. Preprocessing (backend/app/preprocessing.py)
+  │      Renders PDFs to PNGs via PyMuPDF (2x scale) or copies PNG/JPG images
+  │      -> outputs/processed/<doc_id>/page_NNN.png (cached via preprocess.json)
+  │
+  ├─► 2. In-Process Multimodal OCR (backend/app/ocr_service.py)
+  │      Lazy-loads PaddleOCR-VL-1.6-GGUF + mmproj once in-process via llama-cpp-python
+  │      (Llava15ChatHandler, n_ctx=4096) -> outputs/ocr/<doc_id>/ocr_raw.json
+  │
+  ├─► 3. Normalization & Segmentation
+  │      normalization.py -> question_detector.py -> region_associator.py
+  │      -> segmentation.py -> answer_builder.py
+  │      Filters diagnostic/banner noise, detects standard markers (Q1, Ans 1, 1(a))
+  │      and Unicode circled/parenthesized/dotted digits (①–⑳, ⑴–⒇, ⒈–⒑),
+  │      merges multi-page answers, and extracts formulas, tables, charts, diagrams
+  │
+  ├─► 4. Answer Key Parsing (backend/app/answer_key_parser.py)
+  │      Supports PDF/image keys (via OCR + normalization) or .txt / .json keys
+  │      Preserves optional rubric / marking_scheme and key_concepts (default 5.0 marks)
+  │      -> outputs/answer_keys/
+  │
+  ├─► 5. Semantic LLM Grading (backend/app/vlm_evaluator.py, backend/app/grading.py)
+  │      Grades extracted text, formulas, tables, charts, and diagrams against reference
+  │      answers, rubrics, and key concepts (no silent similarity fallback)
+  │      Blank answers -> 0.0 marks + human_review_required=True
+  │      Missing API key -> status="pending" + human_review_required=True
+  │      API/validation error -> status="failed" + human_review_required=True
+  │      Lexical similarity (rapidfuzz) is stored only as passive metadata
+  │
+  └─► 6. Review Queues & Benchmarking
+         ocr_review.py (flags heuristic OCR confidence < 0.7)
+         grading_review.py (flags human_review_required, pending/failed, confidence < 0.7)
+         benchmarking.py (MAE, RMSE, Pearson, Spearman, within-1-mark if human marks exist)
+```
+
+> **Note on `llama.cpp` Integration:** The older external `llama-server` HTTP path (which suffered from PEG-native chat-parser HTTP 500 errors) and per-page `llama-cli` subprocess calls have been replaced by **`LlamaCppOCRService`** running **`llama-cpp-python` in-process**. The model loads lazily once per backend process and stays warm across pages and requests.
+
+---
+
+## Repository Structure
+
+```text
+answer-sheet-evaluator/
+├── backend/
+│   ├── app/
+│   │   ├── main.py                # FastAPI app & CORS setup
+│   │   ├── api.py                 # /api/v1 HTTP endpoints & single-run evaluation lock
+│   │   ├── api_models.py          # Pydantic request/response schemas
+│   │   ├── evaluation_service.py  # End-to-end pipeline orchestration & review updates
+│   │   ├── evaluation_store.py    # JSON persistence in outputs/evaluations/
+│   │   ├── uploads.py             # Validates & saves uploads under data/uploads/
+│   │   ├── dataset_adapter.py     # Dataset config & manifest validation
+│   │   ├── preprocessing.py       # PyMuPDF PDF-to-PNG rendering & image caching
+│   │   ├── ocr_service.py         # In-process llama-cpp-python PaddleOCR-VL service
+│   │   ├── normalization.py       # OCR cleanup & block normalization
+│   │   ├── question_detector.py   # Question header & Unicode marker detection
+│   │   ├── region_associator.py   # Multi-page question-to-region grouping
+│   │   ├── segmentation.py        # Question segmentation artifacts
+│   │   ├── answer_builder.py      # Builds StudentAnswer (text, formulas, tables, diagrams)
+│   │   ├── answer_key_parser.py   # Parses PDF/image/TXT/JSON answer keys
+│   │   ├── vlm_evaluator.py       # Primary OpenAI-compatible LLM grader (Groq/Qwen default)
+│   │   ├── grading.py             # LLMGrader + passive similarity helper
+│   │   ├── ocr_review.py          # OCR confidence scoring & review queue
+│   │   ├── grading_review.py      # Grading confidence scoring & override queue
+│   │   ├── benchmarking.py        # Ground-truth benchmark metrics
+│   │   └── models.py              # Core dataclasses
+│   └── tests/                     # Pytest suite (unit, API, segmentation, grading, reviews)
+├── frontend/
+│   ├── src/
+│   │   └── App.jsx                # React UI: upload/dataset workflows, results & review tabs
+│   ├── .env.example               # VITE_API_BASE_URL configuration
+│   └── package.json
+├── configs/
+│   └── dataset_config.yaml        # Default local dataset manifest config
+├── data/
+│   ├── raw/                       # Local sample/raw student sheets & answer keys
+│   ├── synthetic/                 # Synthetic test fixtures
+│   └── uploads/                   # Ephemeral UI uploads (git-ignored)
+├── models/
+│   └── paddleocr-vl-gguf/         # PaddleOCR-VL-1.6-GGUF model & mmproj weights (git-ignored)
+├── outputs/                       # Cached artifacts (processed, ocr, normalized, evaluations)
+├── .env.example                   # Backend LLM grader env template
+└── requirements.txt               # Core Python dependencies
+```
+
+---
+
+## Prerequisites & Setup
+
+### 1. Python Environment (`.venv`)
+
+Always run backend commands with the project virtual environment (`.venv`), not global `python`, so `PyMuPDF` and `llama-cpp-python` resolve cleanly:
+
+```cmd
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Local OCR also requires `llama-cpp-python` in the same `.venv`:
+
+```cmd
+.\.venv\Scripts\python.exe -m pip install llama-cpp-python
+```
+
+### 2. Local OCR Model Files
+
+Place the PaddleOCR-VL GGUF weights under `models\paddleocr-vl-gguf\`:
+
+- `models\paddleocr-vl-gguf\PaddleOCR-VL-1.6-GGUF.gguf`
+- `models\paddleocr-vl-gguf\PaddleOCR-VL-1.6-GGUF-mmproj.gguf`
+
+You can override these default paths with `LLAMA_CPP_MODEL_PATH` and `LLAMA_CPP_MMPROJ_PATH`.
+
+### 3. LLM Grader Environment Variables (`.env`)
+
+Copy `.env.example` to `.env` in the repository root (`VLMEvaluator` loads `.env` or `backend/.env` automatically if environment variables are not already set):
+
+```env
+VLM_API_KEY=your_groq_api_key_here
+VLM_BASE_URL=https://api.groq.com/openai/v1
+VLM_MODEL=qwen/qwen3.8-27b
+```
+
+- `VLM_API_KEY` (or `GROQ_API_KEY`): API key for grading. If omitted, questions are marked `status="pending"` with `marks_awarded=null` and routed to **Grading Review Gate**.
+- `VLM_BASE_URL`: Any OpenAI-compatible chat-completions endpoint (`https://api.groq.com/openai/v1` by default).
+- `VLM_MODEL`: Model name (`qwen/qwen3.8-27b` by default).
+
+---
+
+## Running the Application
+
+### Start the FastAPI Backend
 
 From the repository root:
 
 ```cmd
-.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-## Start the frontend
+For development with auto-reload:
 
-From `frontend`:
+```cmd
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
+```
+
+Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+
+### Start the React Frontend
+
+From `frontend/`:
 
 ```cmd
 npm.cmd install
 npm.cmd run dev
 ```
 
-Open the URL Vite prints (normally `http://127.0.0.1:5173`). The frontend calls FastAPI at `http://127.0.0.1:8000` by default. To use another API URL, copy `.env.example` to `.env` and set `VITE_API_BASE_URL` before starting Vite.
-
-The UI validates the configured local dataset, selects one discovered student document, starts its cached evaluation, then displays baseline grading and optional benchmark results.
-
-
--------------------------------------------------------------------
-
-# GradeP — OCR / llama.cpp  README
-
-## Purpose
-
-GradeP is a local handwritten answer-sheet evaluation pipeline.
-
-Target pipeline:
-
-Answer Sheet
-→ preprocessing
-→ PaddleOCR-VL-1.6
-→ raw OCR
-→ normalization
-→ question/answer segmentation
-→ student answer vs answer key
-→ transparent baseline similarity
-→ UI
-
-## IMPORTANT: current project state
-
-The PaddleOCR-VL-1.6 GGUF model itself works.
-
-The complete six-page OCR fixture has been successfully run with `llama-cli`.
-
-The intended production/scalable architecture is **NOT llama-cli**. It is:
-
-React
-→ FastAPI
-→ persistent llama-server
-→ HTTP `/v1/chat/completions`
-→ PaddleOCR-VL-1.6 GGUF
-→ OCR JSON
-→ downstream pipeline
-
-The production llama-server path is currently blocked by a llama.cpp chat-parser / PEG-native-format error. This README documents that exact problem.
+Open the URL printed by Vite (typically `http://127.0.0.1:5173`).  
+To point the UI at a non-default backend URL, copy `frontend\.env.example` to `frontend\.env` and edit `VITE_API_BASE_URL`.
 
 ---
 
-## Project paths
+## Using the UI
 
-Repository root:
+### Workflow A — Direct File Upload (Single Student per Run)
+1. Under **Student answer sheet**, choose a `.pdf` or one or more `.png` / `.jpg` / `.jpeg` page images (max `25 MB` per file).
+2. Under **Answer key**, choose a `.pdf`, page image(s), or a single `.txt` / `.json` file (max `25 MB` per file).
+3. Click **Upload & Evaluate**.
+   - Files are content-hashed and saved under `data/uploads/stu_<sha12>_key_<sha12>/` with a generated `configs/dataset_config.json`.
+   - Re-uploading identical files reuses cached preprocessing, OCR, normalization, segmentation, and answer-key artifacts.
 
-```text
-C:\Users\Arnav chanchal\Desktop\GradeP\answer-sheet-evaluator
-```
+### Workflow B — Saved Dataset Config
+1. Keep or edit the **Dataset configuration path** (defaults to `configs/dataset_config.yaml`, pointing to `data/raw/student_answers` and `data/raw/answer_keys`).
+2. Click **Validate dataset**, pick a student sheet from the dropdown, and click **Start Full Pipeline**.
 
-Python environment:
-
-```text
-.venv\Scripts\python.exe
-```
-
-**Always use `.venv\Scripts\python.exe`, not `python`.**
-
-Model directory:
-
-```text
-models\paddleocr-vl-gguf
-```
-
-Model:
-
-```text
-PaddleOCR-VL-1.6-GGUF.gguf
-```
-
-Multimodal projector:
-
-```text
-PaddleOCR-VL-1.6-GGUF-mmproj.gguf
-```
-
-Custom template:
-
-```text
-models\paddleocr-vl-gguf\chat_template.jinja
-```
-
-Absolute template path:
-
-```text
-C:\Users\Arnav chanchal\Desktop\GradeP\answer-sheet-evaluator\models\paddleocr-vl-gguf\chat_template.jinja
-```
+### Review & Inspection Tabs
+- **Evaluated Questions**: Total predicted score, per-question marks (`marks_awarded`), AI reasoning, present/missing concepts, errors, extracted formulas/tables/diagrams, side-by-side reference answer, passive lexical similarity score, and an **Original Exam Page** modal viewer.
+- **OCR Review Gate**: Displays answers whose heuristic OCR confidence is below `0.7` so a reviewer can confirm or correct the extracted text.
+- **Grading Review Gate**: Displays blank, `pending`, `failed`, or low-confidence (`< 0.7`) evaluations so a teacher can **confirm** AI marks or **override** marks with notes (automatically updating question scores and evaluation totals).
 
 ---
 
-## Python / FastAPI
+## REST API Reference (`/api/v1`)
 
-FastAPI entry point:
+| Method | Endpoint | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/uploads` | Upload `student_files` + `answer_key_files`; writes dataset dir & returns `config_path` + `student_document_id` |
+| `POST` | `/api/v1/datasets/validate` | Validate a dataset config YAML/JSON and inspect discovered student docs & answer keys |
+| `POST` | `/api/v1/evaluations` | Run the full pipeline for a config + `student_document_id` (`409 Conflict` if another run holds `_EVALUATION_LOCK`) |
+| `GET` | `/api/v1/evaluations/{evaluation_id}` | Poll evaluation status (`queued`, `running`, `completed`, `failed`) |
+| `GET` | `/api/v1/evaluations/{evaluation_id}/results` | Fetch completed grading summary and benchmark metrics |
+| `GET` | `/api/v1/evaluations/{evaluation_id}/questions` | Fetch per-question student answers, reference answers, and evaluations |
+| `GET` | `/api/v1/evaluations/{evaluation_id}/questions/{question_id}` | Fetch detailed view for a single question |
+| `GET` | `/api/v1/evaluations/{evaluation_id}/pages/{page_number}` | Serve processed exam page PNG/JPEG for UI inspection |
+| `GET` / `POST` | `/api/v1/evaluations/{evaluation_id}/ocr-reviews` (`/{review_id}`) | List OCR reviews or submit human confirmation/correction |
+| `GET` / `POST` | `/api/v1/evaluations/{evaluation_id}/grading-reviews` (`/{review_id}`) | List grading reviews or submit teacher confirmation/override |
 
-```text
-backend\app\main.py
-```
+---
 
-Start backend:
+## Running Tests
+
+From the repository root:
 
 ```cmd
-.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m pytest backend/tests -q
 ```
-
-Development:
-
-```cmd
-.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
-```
-
-Swagger:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-Frontend:
-
-```cmd
-cd frontend
-npm.cmd install
-npm.cmd run dev
-```
-
-Normally:
-
-```text
-http://127.0.0.1:5173
-```
-
----
-
-# llama.cpp status
-
-## Installed version
-
-```text
-version: 0.1.0-dev
-build 10424
-commit 2bacf9ea5
-built with Clang 20.1.8 for Windows x86_64
-```
-
-`llama-server -h` showed these relevant options:
-
-```text
---jinja
---chat-template
---chat-template-file
---skip-chat-parsing
-```
-
-## Desired server
-
-```text
-http://127.0.0.1:8111
-```
-
-The original OCR client was intended to use:
-
-```text
-POST http://127.0.0.1:8111/v1/chat/completions
-```
-
-with:
-
-```json
-{
-  "temperature": 0,
-  "max_tokens": 512
-}
-```
-
-Do not arbitrarily increase the token limit.
-
----
-
-# Why llama-server is currently NOT working reliably
-
-The model loads successfully in llama-server.
-
-The server can sometimes return HTTP 200 and useful OCR.
-
-However, the recurring failure is:
-
-```text
-HTTP 500
-```
-
-with:
-
-```json
-{
-  "error": {
-    "code": 500,
-    "message": "The model produced output that does not match the expected peg-native format",
-    "type": "server_error"
-  }
-}
-```
-
-The server log shows:
-
-```text
-W common_chat_peg_parse: unparsed peg-native output: <OCR text>
-```
-
-then:
-
-```text
-W srv stop: cancel task
-```
-
-and:
-
-```text
-W srv operator(): got exception:
-{"error":{"code":500,"message":"The model produced output that does not match the expected peg-native format","type":"server_error"}}
-```
-
-This is the main unresolved blocker.
-
-**Do not assume the model is broken. It is not.**
-
-The evidence is that the same model successfully performs OCR through llama-cli.
-
----
-
-# Custom chat template
-
-The template downloaded for PaddleOCR-VL-1.6 GGUF is:
-
-```jinja
-{%- if not add_generation_prompt is defined -%}
-    {%- set add_generation_prompt = true -%}
-{%- endif -%}
-{%- if not cls_token is defined -%}
-    {%- set cls_token = "<|begin_of_sentence|>" -%}
-{%- endif -%}
-{%- if not eos_token is defined -%}
-    {%- set eos_token = "</s>" -%}
-{%- endif -%}
-{{- cls_token -}}
-{%- for message in messages -%}
-    {%- if message["role"] == "user" -%}
-        {{- "User: " -}}
-      {%- if message["content"] is string -%}
-        {{- message["content"] }}
-      {%- else -%}
-        {%- for content in message["content"] -%}
-            {%- if content["type"] == "image" -%}
-                {{ "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>" }}
-            {%- endif -%}
-        {%- endfor -%}
-        {%- for content in message["content"] -%}
-            {%- if content["type"] == "text" -%}
-                {{ content["text"] }}
-            {%- endif -%}
-        {%- endfor -%}
-      {%- endif -%}
-        {{ "\n" -}}
-    {%- elif message["role"] == "assistant" -%}
-        {{- "Assistant:\n" -}}
-      {%- if message["content"] is string -%}
-        {{- message["content"] }}
-      {%- else -%}
-        {%- for content in message["content"] -%}
-            {%- if content["type"] == "text" -%}
-                {{ content["text"] }}
-            {%- endif -%}
-        {%- endfor -%}
-      {%- endif -%}
-        {{ eos_token -}}
-    {%- elif message["role"] == "system" -%}
-      {%- if message["content"] is string -%}
-        {{- message["content"] }}
-      {%- else -%}
-        {%- for content in message["content"] -%}
-            {%- if content["type"] == "text" -%}
-                {{ content["text"] + "\n" }}
-            {%- endif -%}
-        {%- endfor -%}
-      {%- endif -%}
-    {%- endif -%}
-{%- endfor -%}
-{%- if add_generation_prompt -%}
-    {{- "Assistant:\n" -}}
-{%- endif -%}
-```
-
-Several relative-path mistakes happened during setup. Use the absolute template path if necessary.
-
----
-
-# Server experiments already performed
-
-Configurations using combinations of:
-
-```text
---jinja
---chat-template-file
---skip-chat-parsing
-```
-
-were tried.
-
-Some configurations successfully loaded the model.
-
-However, the HTTP 500 PEG-native parsing problem still occurred.
-
-Therefore:
-
-**The exact reliable llama-server invocation/configuration has NOT been solved.**
-
-Do not claim that it has.
-
-A raw/content-only endpoint experiment returned HTTP 200 but unusable repeated output resembling:
-
-```text
-ìng<fcel>谪书四书<fcel>《诗经》卷首...
-```
-
-with 512 generated tokens.
-
-This proves that simply bypassing the chat parser is not automatically the solution. Correct multimodal image/template handling is still required.
-
----
-
-# llama-cli diagnostic path
-
-`llama-cli` successfully proves that PaddleOCR-VL itself works.
-
-Example:
-
-```cmd
-llama-cli -m "models\paddleocr-vl-gguf\PaddleOCR-VL-1.6-GGUF.gguf" --mmproj "models\paddleocr-vl-gguf\PaddleOCR-VL-1.6-GGUF-mmproj.gguf" --image "outputs\processed\C1\page_001.png" -p "OCR:" -n 512 --temp 0
-```
-
-It produces useful handwritten OCR.
-
-Page 1 produced content including:
-
-```text
-Digital Assignment - 1:
-Implementation of Cluster computing in ViT...
-Types of cluster systems:
-High-performance Computing (HPC) clusters...
-Use cases in ViT...
-```
-
-Page 5 also produced useful OCR containing handwritten public/private/hybrid cloud notes and a hand-drawn diagram.
-
-Therefore:
-
-**PaddleOCR-VL-1.6 + GGUF + mmproj + image input works.**
-
----
-
-# Why llama-cli is not the final architecture
-
-With CLI, each page can cause a separate process/model load:
-
-```text
-page 1 → start llama-cli → load model → OCR → exit
-page 2 → start llama-cli → load model → OCR → exit
-...
-```
-
-That is slow and unsuitable as the intended scalable backend.
-
-The desired architecture keeps the model loaded:
-
-```text
-FastAPI
-→ persistent llama-server
-→ HTTP requests for pages
-```
-
-Therefore llama-cli should remain a diagnostic/fallback path only.
-
----
-
-# Full CLI OCR fixture
-
-Command:
-
-```cmd
-.venv\Scripts\python.exe -m backend.scripts.ocr_fixture
-```
-
-Successful result:
-
-```json
-{
-  "document_id": "C1",
-  "raw_ocr_path": "C:\Users\Arnav chanchal\Desktop\GradeP\answer-sheet-evaluator\outputs\ocr\C1\ocr_raw.json",
-  "page_count": 6,
-  "cached": false
-}
-```
-
-Current OCR raw file:
-
-```text
-outputs\ocr\C1\ocr_raw.json
-```
-
-Observed size:
-
-```text
-70,817 bytes
-```
-
-So the full six-page OCR fixture can run with CLI.
-
----
-
-# Current OCR service situation
-
-During server debugging, `backend/app/ocr_service.py` was temporarily changed to use `subprocess.run()` and `llama-cli`.
-
-The desired final implementation should return to:
-
-```text
-requests.post()
-```
-
-against:
-
-```text
-/v1/chat/completions
-```
-
-The original intended request contains:
-
-- user text prompt
-- base64 image
-- `temperature: 0`
-- `max_tokens: 512`
-
-Prompt:
-
-```text
-Read this handwritten answer sheet image. Transcribe all visible text exactly. Preserve question numbers and describe any diagrams.
-```
-
-The service converts returned transcription to the project's Paddle-compatible shape:
-
-```json
-{
-  "parsing_res_list": [
-    {
-      "block_label": "text",
-      "block_content": "...",
-      "block_order": 0,
-      "block_id": 0,
-      "block_bbox": null,
-      "block_polygon_points": null
-    }
-  ]
-}
-```
-
----
-
-# Unit tests
-
-The OCR tests originally expected HTTP requests.
-
-Because the implementation was temporarily switched to CLI, the tests were temporarily changed to mock subprocess.
-
-The temporary CLI-focused tests eventually passed:
-
-```text
-Ran 3 tests in 0.031s
-
-OK
-```
-
-Once llama-server HTTP is fixed, tests should be restored to mock:
-
-```python
-requests.post
-```
-
-and verify:
-
-```text
-/v1/chat/completions
-temperature = 0
-max_tokens = 512
-base64 image
-```
-
-Do not leave the CLI implementation as the final backend merely because those temporary tests pass.
-
----
-
-# Downstream outputs
-
-The project currently contains:
-
-```text
-outputs\ocr\C1\ocr_raw.json
-outputs\normalized\C1\normalized.json
-outputs\evaluations\*.json
-```
-
-and answer-key normalized outputs such as:
-
-```text
-outputs\answer_keys\normalized\C2\normalized.json
-outputs\answer_keys\normalized\key_001\normalized.json
-```
-
-Thus the pipeline is generating downstream artifacts.
-
----
-
-# Current UI behavior
-
-The React UI works and can process the selected C1 student sheet.
-
-The UI eventually displayed evaluation results such as:
-
-```text
-Q1
-Similarity: 0.0%
-
-Student answer
-No answer available.
-```
-
-and similarly for Q2, Q3 and Q4.
-
-The reference answers are displayed correctly.
-
-This does NOT mean the OCR model failed.
-
-The current problem is downstream and/or contaminated input.
-
----
-
-# Important downstream diagnosis
-
-The actual student sheet contains handwritten/circled question numbers such as:
-
-```text
-①
-②
-```
-
-OCR can corrupt these characters.
-
-For example, raw OCR has contained malformed representations such as:
-
-```text
-â‘¡
-```
-
-instead of a clean circled digit.
-
-If the segmentation code expects only:
-
-```text
-Q1
-Q2
-Question 1
-Question 2
-```
-
-then the student's answers may never be mapped into Q1/Q2/Q3/Q4.
-
-That would explain:
-
-```text
-Student answer: No answer available
-Similarity: 0%
-```
-
-even though OCR text exists.
-
-**However, this is a hypothesis, not yet proven.**
-
-Before changing segmentation, inspect:
-
-```text
-outputs\normalized\C1\normalized.json
-```
-
-and determine whether student answers actually exist there.
-
----
-
-# CLI stdout contamination
-
-The CLI can print non-OCR artifacts:
-
-```text
-Loading model...
-build ...
-model ...
-ftype ...
-modalities ...
-Loaded media from ...
-> OCR:
-Exiting...
-```
-
-Some of these artifacts entered raw OCR output.
-
-For example, raw output has included:
-
-```text
-Loading model...
-...
-Exiting...
-```
-
-Therefore CLI output cleaning is needed if CLI is used for the demo.
-
-But this is NOT the main production blocker.
-
-The main production blocker remains llama-server's PEG-native parsing.
-
----
-
-# Page 5 evidence
-
-Page 5 contains:
-
-- a hand-drawn cloud-computing diagram
-- public cloud
-- VIT learning platforms
-- student/faculty figures
-- benefits
-- use cases
-- private cloud
-- hybrid cloud
-
-The model can read this page through llama-cli.
-
-Therefore:
-
-**Do not assume the HTTP 500 is simply caused by a complex freestyle figure.**
-
-The PEG-native error has occurred on other content as well.
-
----
-
-# Current architecture
-
-## Working diagnostic/demo path
-
-```text
-React
- ↓
-FastAPI
- ↓
-llama-cli
- ↓
-PaddleOCR-VL-1.6 GGUF
- ↓
-OCR JSON
- ↓
-normalization
- ↓
-evaluation
- ↓
-React
-```
-
-## Intended scalable path
-
-```text
-React
- ↓
-FastAPI
- ↓
-persistent llama-server
- ↓
-HTTP /v1/chat/completions
- ↓
-PaddleOCR-VL-1.6 GGUF
- ↓
-OCR JSON
- ↓
-normalization
- ↓
-question/answer segmentation
- ↓
-evaluation
- ↓
-React
-```
-
----
-
-# Current known facts
-
-1. PaddleOCR-VL-1.6 GGUF loads.
-2. The mmproj loads.
-3. Handwritten pages can be OCR'd.
-4. The six-page C1 CLI fixture works.
-5. FastAPI entry point is `backend.app.main:app`.
-6. React frontend works.
-7. Raw OCR JSON is generated.
-8. Normalized and evaluation JSON files are generated.
-9. Current UI can display evaluation results.
-10. Current CLI OCR path is not the scalable production architecture.
-11. llama-server HTTP is the intended architecture.
-12. llama-server repeatedly fails with:
-   `The model produced output that does not match the expected peg-native format`.
-13. Server logs show:
-   `common_chat_peg_parse: unparsed peg-native output`.
-14. `--skip-chat-parsing` was investigated but did not yet produce a proven reliable HTTP OCR path.
-15. A raw HTTP/content-only test returned HTTP 200 but garbage/repeated tokens.
-16. Therefore the exact llama-server configuration is still unresolved.
-17. Current UI `No answer available` results should not be treated as valid grading/benchmark results.
-18. The next debugging step should inspect intermediate normalized output before changing downstream segmentation.
-
----
-
-# Recommended next steps
-
-Because development/Codex budget is limited, debug one layer at a time.
-
-## Step 1 — prove llama-server HTTP on one image
-
-Start llama-server.
-
-Use one standalone Python HTTP test against:
-
-```text
-outputs\processed\C1\page_001.png
-```
-
-Confirm:
-
-```text
-HTTP 200
-```
-
-and inspect returned content.
-
-Then repeat only for:
-
-```text
-outputs\processed\C1\page_005.png
-```
-
-Do not run all six pages until both work.
-
-## Step 2 — solve PEG-native parsing
-
-Investigate the exact interaction between:
-
-```text
---jinja
---chat-template-file
---skip-chat-parsing
-```
-
-and the model's expected output/template.
-
-The error to solve is:
-
-```text
-The model produced output that does not match the expected peg-native format
-```
-
-## Step 3 — restore HTTP OCR service
-
-Once HTTP OCR is reliable, change `_ocr_page()` back to `requests.post()`.
-
-## Step 4 — restore HTTP-focused tests
-
-Mock `requests.post()` again.
-
-## Step 5 — run C1 through backend
-
-Verify raw OCR JSON is clean.
-
-## Step 6 — inspect normalization
-
-Check:
-
-```text
-outputs\normalized\C1\normalized.json
-```
-
-Verify whether student answers exist.
-
-## Step 7 — only then fix segmentation
-
-If OCR has answers but normalized output loses them, investigate question-number normalization/segmentation.
-
-## Step 8 — only then trust evaluation/UI
-
-The current baseline similarity result is only meaningful after student-answer mapping is confirmed.
-
----
-
-# What NOT to do
-
-Do not:
-
-- permanently switch to llama-cli
-- claim llama-server is solved
-- assume the model is broken
-- assume diagrams are the root cause
-- increase max_tokens arbitrarily
-- repeatedly rewrite the OCR service without isolated server tests
-- change segmentation before inspecting normalized output
-- treat the current 0% UI result as a benchmark
-- assume `--skip-chat-parsing` alone fixes the server
-- use global `python`
-- spend remaining Codex budget on broad refactors
-
----
-
-# Fresh-chat instruction
-
-When starting a new chat, give this README to the assistant and say:
-
-> Read this README as the authoritative current GradeP project state. Do not assume anything that is not supported by it. The PaddleOCR-VL model is already proven to work through llama-cli. The goal now is to solve the llama.cpp llama-server HTTP integration so the model can be used persistently and scalably. Debug the server path first, then restore the HTTP OCR service, and only after that debug downstream normalization/segmentation. Make minimal, evidence-driven changes because development/Codex budget is limited.
