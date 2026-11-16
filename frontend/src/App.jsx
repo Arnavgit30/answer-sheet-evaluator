@@ -28,6 +28,8 @@ export default function App() {
   const [activePageModal, setActivePageModal] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [studentFiles, setStudentFiles] = useState([])
+  const [keyFiles, setKeyFiles] = useState([])
 
   const selectedStudent = useMemo(
     () => validation?.manifest?.student_documents?.find((student) => student.document_id === studentId),
@@ -82,8 +84,8 @@ export default function App() {
     window.setTimeout(() => pollEvaluation(evaluationId).catch((err) => setError(err.message)), 1200)
   }
 
-  const startEvaluation = async () => {
-    if (!validation?.valid || !studentId) return setError('Validate a dataset and select a student answer sheet first.')
+  const startEvaluation = async (path = configPath, docId = studentId) => {
+    if (!docId) return setError('Validate a dataset or upload files first.')
     setLoading(true)
     setError('')
     setResults(null)
@@ -91,7 +93,7 @@ export default function App() {
     try {
       const data = await request('/api/v1/evaluations', {
         method: 'POST',
-        body: JSON.stringify({ config_path: configPath, student_document_id: studentId }),
+        body: JSON.stringify({ config_path: path, student_document_id: docId }),
       })
       setEvaluation(data)
       if (data.status === 'completed') await fetchDetails(data.evaluation_id)
@@ -100,6 +102,26 @@ export default function App() {
     } catch (err) {
       setError(err.message)
     } finally {
+      setLoading(false)
+    }
+  }
+
+  const uploadAndEvaluate = async () => {
+    if (!studentFiles.length || !keyFiles.length) return setError('Choose a student sheet and an answer key.')
+    setLoading(true)
+    setError('')
+    try {
+      const form = new FormData()
+      studentFiles.forEach((f) => form.append('student_files', f))
+      keyFiles.forEach((f) => form.append('answer_key_files', f))
+      const res = await fetch(`${API_BASE_URL}/api/v1/uploads`, { method: 'POST', body: form })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || 'Upload failed.')
+      setConfigPath(data.config_path)
+      setStudentId(data.student_document_id)
+      await startEvaluation(data.config_path, data.student_document_id)
+    } catch (err) {
+      setError(err.message)
       setLoading(false)
     }
   }
@@ -156,6 +178,36 @@ export default function App() {
       {/* Dataset config and trigger */}
       <section className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
         <h2 className="text-lg font-semibold text-slate-900">Dataset and Evaluation Configuration</h2>
+        <div className="mt-4 grid gap-4 border-b border-slate-200 pb-5 md:grid-cols-[1fr_1fr_auto]">
+          <label className="block text-sm font-medium text-slate-700">
+            Student answer sheet (PDF or page images)
+            <input
+              type="file"
+              multiple
+              accept=".pdf,.png,.jpg,.jpeg"
+              onChange={(e) => setStudentFiles([...(e.target.files || [])])}
+              className="mt-1 block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-indigo-700 hover:file:bg-indigo-100"
+            />
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            Answer key (PDF, images, TXT or JSON)
+            <input
+              type="file"
+              multiple
+              accept=".pdf,.png,.jpg,.jpeg,.txt,.json"
+              onChange={(e) => setKeyFiles([...(e.target.files || [])])}
+              className="mt-1 block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-indigo-700 hover:file:bg-indigo-100"
+            />
+          </label>
+          <button
+            onClick={uploadAndEvaluate}
+            disabled={loading}
+            className="self-end rounded-md bg-emerald-600 px-4 py-2 font-medium text-white hover:bg-emerald-700 disabled:bg-slate-400"
+          >
+            {loading ? 'Evaluating…' : 'Upload & Evaluate'}
+          </button>
+        </div>
+
         <div className="mt-4 grid gap-4 md:grid-cols-[1fr_auto]">
           <label className="block text-sm font-medium text-slate-700">
             Dataset configuration path
@@ -200,7 +252,7 @@ export default function App() {
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
-            onClick={startEvaluation}
+            onClick={() => startEvaluation()}
             disabled={loading || !validation?.valid || !studentId}
             className="rounded-md bg-emerald-600 px-5 py-2 font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400 shadow-sm"
           >

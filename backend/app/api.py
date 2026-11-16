@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+import threading
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.app.api_models import (
     DatasetValidationRequest,
@@ -15,6 +17,10 @@ from backend.app.api_models import (
     OCRReviewActionRequest,
 )
 from backend.app.evaluation_service import EvaluationService
+from backend.app.uploads import MAX_FILE_BYTES, save_upload
+
+# ponytail: one global lock = one evaluation at a time; use a job queue if concurrency matters
+_EVALUATION_LOCK = threading.Lock()
 
 
 def create_router(service: EvaluationService) -> APIRouter:
@@ -33,8 +39,23 @@ def create_router(service: EvaluationService) -> APIRouter:
 
     @router.post("/evaluations", response_model=EvaluationResponse)
     def create_evaluation(request: EvaluationRequest) -> dict:
+        if not _EVALUATION_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Another evaluation is already running")
         try:
             return service.start_evaluation(request.config_path, request.student_document_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            _EVALUATION_LOCK.release()
+
+    @router.post("/uploads")
+    def upload_files(
+        student_files: list[UploadFile] = File(...),
+        answer_key_files: list[UploadFile] = File(...),
+    ) -> dict:
+        read = lambda files: [(f.filename or "", f.file.read(MAX_FILE_BYTES + 1)) for f in files]
+        try:
+            return save_upload(read(student_files), read(answer_key_files))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

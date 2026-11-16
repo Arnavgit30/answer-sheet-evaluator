@@ -124,6 +124,43 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["human_marks"], 4.5)
 
+    def test_upload_writes_dataset_and_rejects_bad_files(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from backend.app import uploads
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(uploads, "PROJECT_ROOT", Path(tmp)):
+            ok = self.client.post(
+                "/api/v1/uploads",
+                files=[
+                    ("student_files", ("p1.jpg", b"img1", "image/jpeg")),
+                    ("student_files", ("p2.jpg", b"img2", "image/jpeg")),
+                    ("answer_key_files", ("key.json", b'{"questions": []}', "application/json")),
+                ],
+            )
+            self.assertEqual(ok.status_code, 200)
+            body = ok.json()
+            config = Path(tmp) / body["config_path"]
+            root = config.parent.parent
+            self.assertTrue(
+                (root / "student_answers" / body["student_document_id"] / "page_002.jpg").is_file()
+            )
+            self.assertEqual(
+                json.loads(config.read_text(encoding="utf-8"))["answer_keys"],
+                {"path": "answer_keys"},
+            )
+
+            bad = self.client.post(
+                "/api/v1/uploads",
+                files=[
+                    ("student_files", ("evil.exe", b"x", "application/octet-stream")),
+                    ("answer_key_files", ("key.txt", b"Q1 ans", "text/plain")),
+                ],
+            )
+            self.assertEqual(bad.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

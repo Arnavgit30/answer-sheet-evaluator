@@ -81,7 +81,10 @@ def _image_dimensions(image_path: Path) -> tuple[int | None, int | None]:
 
 def _render_pdf(source: Path, destination_dir: Path, start_page: int) -> list[ProcessedPage]:
     # Import only when PDF processing is requested, keeping image-only use lightweight.
-    import fitz
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
 
     pages: list[ProcessedPage] = []
     with fitz.open(source) as pdf:
