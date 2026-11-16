@@ -1,4 +1,4 @@
-# GradeP — Answer Sheet Evaluator
+# GradePilot — Answer Sheet Evaluator
 
 A local-first handwritten answer-sheet OCR and AI grading pipeline built with **FastAPI**, **React (Vite + Tailwind)**, **llama-cpp-python (`PaddleOCR-VL-1.6-GGUF`)**, and **OpenAI-compatible LLM grading (`qwen/qwen3.8-27b` on Groq by default)**.
 
