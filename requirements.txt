@@ -4,6 +4,7 @@ pydantic
 python-multipart
 requests
 Pillow
+PyMuPDF
 pandas
 numpy
 rapidfuzz
